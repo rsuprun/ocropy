@@ -1,0 +1,386 @@
+#!/usr/bin/env python
+import argparse
+import glob
+import os
+import os.path
+import sys
+import traceback
+from multiprocessing import Pool
+
+import cv2
+import numpy as np
+import scipy.ndimage as ndimage
+from imageio import imwrite
+
+import misc_components as pg_seg_aux
+
+parser = argparse.ArgumentParser(add_help=False)
+
+# error checking
+group_error_checking = parser.add_argument_group('error checking')
+group_error_checking.add_argument('--minscale', type=float, default=12.0,
+                                  help='minimum scale permitted, default: %(default)s')
+group_error_checking.add_argument('--maxlines', type=float, default=300,
+                                  help='maximum # lines permitted, default: %(default)s')
+
+# scale parameters
+group_scale = parser.add_argument_group('scale parameters')
+group_scale.add_argument('--scale', type=float, default=0.0,
+                         help='the basic scale of the document (roughly, xheight) 0=automatic, default: %(default)s')
+group_scale.add_argument('--hscale', type=float, default=1.0,
+                         help='non-standard scaling of horizontal parameters, default: %(default)s')
+group_scale.add_argument('--vscale', type=float, default=1.0,
+                         help='non-standard scaling of vertical parameters, default: %(default)s')
+
+# line parameters
+group_line = parser.add_argument_group('line parameters')
+group_line.add_argument('--threshold', type=float, default=0.2,
+                        help='baseline threshold, default: %(default)s')
+group_line.add_argument('--noise', type=int, default=8,
+                        help="noise threshold for removing small components from lines, default: %(default)s")
+group_line.add_argument('--usegauss', action='store_true',
+                        help='use gaussian instead of uniform, default: %(default)s')
+
+# column parameters
+group_column = parser.add_argument_group('column parameters')
+group_column.add_argument('--maxseps', type=int, default=0,
+                          help='maximum black column separators, default: %(default)s')
+group_column.add_argument('--sepwiden', type=int, default=10,
+                          help='widen black separators (to account for warping), default: %(default)s')
+# Obsolete parameter for 'also check for black column separators'
+# which can now be triggered simply by a positive maxseps value.
+group_column.add_argument('-b', '--blackseps', action="store_true",
+                          help=argparse.SUPPRESS)
+
+# whitespace column separators
+group_column.add_argument('--maxcolseps', type=int, default=3,
+                          help='maximum # whitespace column separators, default: %(default)s')
+group_column.add_argument('--csminheight', type=float, default=10,
+                          help='minimum column height (units=scale), default: %(default)s')
+# Obsolete parameter for the 'minimum aspect ratio for column separators'
+# used in the obsolete function compute_colseps_morph
+group_column.add_argument('--csminaspect', type=float, default=1.1,
+                          help=argparse.SUPPRESS)
+
+# output parameters
+group_output = parser.add_argument_group('output parameters')
+group_output.add_argument('-p', '--pad', type=int, default=3,
+                          help='padding for extracted lines, default: %(default)s')
+group_output.add_argument('-e', '--expand', type=int, default=3,
+                          help='expand mask for grayscale extraction, default: %(default)s')
+group_output.add_argument('--out_dir_suffix', type=str, default='',
+                          help='output directory suffix, default: %(default)s')
+group_output.add_argument('-o', '--output',  type=str, default='',
+                          help='output directory, default: %(default)s')
+
+# other parameters
+group_others = parser.add_argument_group('others')
+group_others.add_argument('-q', '--quiet', action='store_true',
+                          help='be less verbose, default: %(default)s')
+group_others.add_argument('-Q', '--parallel', type=int, default=0,
+                          help="number of CPUs to use")
+group_others.add_argument('-d', '--debug', action="store_true")
+
+# input files
+parser.add_argument('files', nargs='+')
+
+def main_process(input_args):
+
+
+    def print_info(*objs):
+        print("INFO: ", *objs, file=sys.stdout)
+
+    def print_error(*objs):
+        print("ERROR: ", *objs, file=sys.stderr)
+
+    def DSAVE(title, image):
+        if not args.debug: return
+        if type(image) == list:
+            assert len(image) == 3
+            image = np.transpose(np.array(image), [1, 2, 0])
+        fname = "_" + title + ".png"
+        print_info("debug " + fname)
+        imwrite(fname, image.astype('float'))
+
+    def apply_mask(binary, colseps):
+        try:
+            mask = pg_seg_aux.read_image_binary(base + ".mask.png")
+        except IOError:
+            return binary, colseps
+        masked_seps = np.maximum(colseps, mask)
+        binary = np.minimum(binary, 1 - masked_seps)
+        DSAVE("masked_seps", masked_seps)
+        return binary, masked_seps
+
+
+    ################################################################
+    ### Column finding.
+    ###
+    ### This attempts to find column separators, either as extended
+    ### vertical black lines or extended vertical whitespace.
+    ### It will work fairly well in simple cases, but for unusual
+    ### documents, you need to tune the parameters or use a mask.
+    ################################################################
+
+    def compute_separators_morph(binary, scale):
+        """Finds vertical black lines corresponding to column separators."""
+        d0 = int(max(5, scale / 4))
+        d1 = int(max(5, scale)) + args.sepwiden
+        thick = pg_seg_aux.r_dilation(binary, (d0, d1))
+        vert = pg_seg_aux.rb_opening(thick, (10 * scale, 1))
+        vert = pg_seg_aux.r_erosion(vert, (d0 // 2, args.sepwiden))
+        vert = pg_seg_aux.select_regions(vert, pg_seg_aux.dim1, min=3, nbest=2 * args.maxseps)
+        vert = pg_seg_aux.select_regions(vert, pg_seg_aux.dim0, min=20 * scale, nbest=args.maxseps)
+        return vert
+
+    def compute_colseps_conv(binary, scale=1.0):
+        """Find column separators by convolution and
+        thresholding."""
+        h, w = binary.shape
+        # find vertical whitespace by thresholding
+        smoothed =  ndimage.gaussian_filter(1.0 * binary, (scale, scale * 0.5))
+        smoothed = ndimage.uniform_filter(smoothed, (5.0 * scale, 1))
+        thresh = (smoothed < np.amax(smoothed) * 0.1)
+        DSAVE("1thresh", thresh)
+        # find column edges by filtering
+        grad =  ndimage.gaussian_filter(1.0 * binary, (scale, scale * 0.5), order=(0, 1))
+        grad =  ndimage.uniform_filter(grad, (10.0 * scale, 1))
+        # grad = abs(grad) # use this for finding both edges
+        grad = (grad > 0.5 * np.amax(grad))
+        DSAVE("2grad", grad)
+        # combine edges and whitespace
+        seps = np.minimum(thresh,  ndimage.maximum_filter(grad, (int(scale), int(5 * scale))))
+        seps =  ndimage.maximum_filter(seps, (int(2 * scale), 1))
+        DSAVE("3seps", seps)
+        # select only the biggest column separators
+        seps = pg_seg_aux.select_regions(seps, pg_seg_aux.dim0, min=args.csminheight * scale, nbest=args.maxcolseps)
+        DSAVE("4seps", seps)
+        return seps
+
+    def compute_colseps(binary, scale):
+        """Computes column separators either from vertical black lines or whitespace."""
+        print_info("considering at most %g whitespace column separators" % args.maxcolseps)
+        colseps = compute_colseps_conv(binary, scale)
+        DSAVE("colwsseps", 0.7 * colseps + 0.3 * binary)
+        if args.blackseps and args.maxseps == 0:
+            # simulate old behaviour of blackseps when the default value
+            # for maxseps was 2, but only when the maxseps-value is still zero
+            # and not set manually to a non-zero value
+            args.maxseps = 2
+        if args.maxseps > 0:
+            print_info("considering at most %g black column separators" % args.maxseps)
+            seps = compute_separators_morph(binary, scale)
+            DSAVE("colseps", 0.7 * seps + 0.3 * binary)
+            # colseps = compute_colseps_morph(binary,scale)
+            colseps = np.maximum(colseps, seps)
+            binary = np.minimum(binary, 1 - seps)
+        binary, colseps = apply_mask(binary, colseps)
+        return colseps, binary
+
+    ################################################################
+    ### Text Line Finding.
+    ###
+    ### This identifies the tops and bottoms of text lines by
+    ### computing gradients and performing some adaptive thresholding.
+    ### Those components are then used as seeds for the text lines.
+    ################################################################
+
+    def compute_gradmaps(binary, scale):
+        # use gradient filtering to find baselines
+        boxmap = pg_seg_aux.compute_boxmap(binary, scale)
+
+
+        cleaned = boxmap * binary
+        DSAVE("cleaned", cleaned)
+        if args.usegauss:
+            # this uses Gaussians
+            grad = ndimage.gaussian_filter(1.0 * cleaned, (args.vscale * 0.3 * scale,
+                                                   args.hscale * 6 * scale), order=(1, 0))
+        else:
+            # this uses non-Gaussian oriented filters
+            grad = ndimage.gaussian_filter(1.0 * cleaned, (max(4, args.vscale * 0.3 * scale),
+                                                   args.hscale * scale), order=(1, 0))
+            grad = ndimage.uniform_filter(grad, (args.vscale, args.hscale * 6 * scale))
+        bottom = pg_seg_aux.norm_max((grad < 0) * (-grad))
+        top = pg_seg_aux.norm_max((grad > 0) * grad)
+        return bottom, top, boxmap
+
+    def compute_line_seeds(binary, bottom, top, colseps, scale):
+        """Base on gradient maps, computes candidates for baselines
+        and xheights.  Then, it marks the regions between the two
+        as a line seed."""
+        t = args.threshold
+        vrange = int(args.vscale * scale)
+        bmarked = ndimage.maximum_filter(bottom ==  ndimage.maximum_filter(bottom, (vrange, 0)), (2, 2))
+        bmarked = bmarked * (bottom > t * np.amax(bottom) * t) * (1 - colseps)
+        tmarked =  ndimage.maximum_filter(top ==  ndimage.maximum_filter(top, (vrange, 0)), (2, 2))
+        tmarked = tmarked * (top > t * np.amax(top) * t / 2) * (1 - colseps)
+        tmarked = ndimage.maximum_filter(tmarked, (1, 20))
+        seeds = np.zeros(binary.shape, 'i')
+        delta = max(3, int(scale / 2))
+        for x in range(bmarked.shape[1]):
+            transitions = sorted([(y, 1) for y in pg_seg_aux.find(bmarked[:, x])] + [(y, 0) for y in pg_seg_aux.find(tmarked[:, x])])[::-1]
+            transitions += [(0, 0)]
+            for l in range(len(transitions) - 1):
+                y0, s0 = transitions[l]
+                if s0 == 0: continue
+                seeds[y0 - delta:y0, x] = 1
+                y1, s1 = transitions[l + 1]
+                if s1 == 0 and (y0 - y1) < 5 * scale: seeds[y1:y0, x] = 1
+        seeds =  ndimage.maximum_filter(seeds, (1, int(1 + scale)))
+        seeds = seeds * (1 - colseps)
+        DSAVE("lineseeds", [seeds, 0.3 * tmarked + 0.7 * bmarked, binary])
+        seeds, _ = pg_seg_aux.label(seeds)
+        return seeds
+
+    ################################################################
+    ### The complete line segmentation process.
+    ################################################################
+
+    def compute_segmentation(binary, scale):
+        """Given a binary image, compute a complete segmentation into
+        lines, computing both columns and text lines."""
+        binary = np.array(binary, 'B')
+
+        # start by removing horizontal black lines, which only
+        # interfere with the rest of the page segmentation
+        binary = pg_seg_aux.remove_hlines(binary, scale)
+
+        # _binary = binary * 255
+        # pg_seg_aux.disp_img(_binary,'temp', _binary.shape[0], _binary.shape[1])
+        # cv2.waitKey(0)
+
+        # do the column finding
+        if not args.quiet: print_info("computing column separators")
+        colseps, binary = compute_colseps(binary, scale)
+
+        # now compute the text line seeds
+        if not args.quiet: print_info("computing lines")
+        bottom, top, boxmap = compute_gradmaps(binary, scale)
+
+        _bottom = np.array(bottom * 255, dtype='uint8')
+        _top = np.array(top * 255, dtype='uint8')
+        _boxmap = np.array(boxmap * 255, dtype='uint8')
+        pg_seg_aux.disp_img(_bottom,'temp', _bottom.shape[0], _bottom.shape[1])
+        pg_seg_aux.disp_img(_top,'temp2', _top.shape[0], _top.shape[1])
+        pg_seg_aux.disp_img(_boxmap, 'temp3', _boxmap.shape[0], _boxmap.shape[1])
+        cv2.waitKey(0)
+
+        seeds = compute_line_seeds(binary, bottom, top, colseps, scale)
+        DSAVE("seeds", [bottom, top, boxmap])
+
+        # spread the text line seeds to all the remaining
+        # components
+        if not args.quiet: print_info("propagating labels")
+        llabels = pg_seg_aux.propagate_labels(boxmap, seeds, conflict=0)
+        if not args.quiet: print_info("spreading labels")
+        spread = pg_seg_aux.spread_labels(seeds, maxdist=scale)
+        llabels = np.where(llabels > 0, llabels, spread * binary)
+        segmentation = llabels * binary
+        return segmentation
+
+    ################################################################
+    ### Processing each file.
+    ################################################################
+
+    def process1(job):
+        fname, i = job
+        global base
+        base, _ = pg_seg_aux.allsplitext(fname)
+        last_fldr = os.path.split(base)[1] + args.out_dir_suffix
+        if args.output == '':
+            outputdir = os.path.join(os.path.split(base)[0],  last_fldr)
+        else:
+            outputdir = os.path.join(os.path.split(base)[0], args.output,  last_fldr)
+
+        try:
+            binary = pg_seg_aux.read_image_binary(base + ".bin.png")
+        except IOError:
+            try:
+                binary = pg_seg_aux.read_image_binary(fname)
+            except IOError:
+                # if ocrolib.trace: traceback.print_exc()
+                print_error("cannot open either %s.bin.png or %s" % (base, fname))
+                return
+
+        binary = 1 - binary  # invert
+
+        if args.scale == 0:
+            scale = pg_seg_aux.estimate_scale(binary)
+        else:
+            scale = args.scale
+        print_info("scale %f" % (scale))
+        if np.isnan(scale) or scale > 1000.0:
+            print_error("%s: bad scale (%g); skipping\n" % (fname, scale))
+            return
+        if scale < args.minscale:
+            print_error("%s: scale (%g) less than --minscale; skipping\n" % (fname, scale))
+            return
+
+        # find columns and text lines
+
+        if not args.quiet: print_info("computing segmentation")
+        segmentation = compute_segmentation(binary, scale)
+        if np.amax(segmentation) > args.maxlines:
+            print_error("%s: too many lines %g" % (fname, np.amax(segmentation)))
+            return
+        if not args.quiet: print_info("number of lines %g" % np.amax(segmentation))
+
+        # compute the reading order
+
+        if not args.quiet: print_info("finding reading order")
+        lines = pg_seg_aux.compute_lines(segmentation, scale)
+        order = pg_seg_aux.reading_order([l.bounds for l in lines])
+        lsort = pg_seg_aux.topsort(order)
+
+        # renumber the labels so that they conform to the specs
+
+        nlabels = np.amax(segmentation) + 1
+        renumber = np.zeros(nlabels, 'i')
+        for i, v in enumerate(lsort): renumber[lines[v].label] = 0x010000 + (i + 1)
+        segmentation = renumber[segmentation]
+
+        # finally, output everything
+        if not args.quiet: print_info("writing lines")
+        if not os.path.exists(outputdir):
+            os.mkdir(outputdir)
+        lines = [lines[i] for i in lsort]
+        pg_seg_aux.write_page_segmentation("%s.pseg.png" % outputdir, segmentation)
+        cleaned = pg_seg_aux.remove_noise(binary, args.noise)
+        for i, l in enumerate(lines):
+            binline = pg_seg_aux.extract_masked(1 - cleaned, l, pad=args.pad, expand=args.expand)
+            pg_seg_aux.write_image_binary("%s/01%04x.bin.png" % (outputdir, i + 1), binline)
+        print_info("%6d  %s %4.1f %d" % (i, fname, scale, len(lines)))
+
+    args = parser.parse_args(input_args)
+    args.files = pg_seg_aux.glob_all(args.files)
+
+    if len(args.files) < 1:
+        parser.print_help()
+        sys.exit(0)
+
+    print_info("")
+    print_info("#" * 10, (" ".join(sys.argv))[:60])
+    print_info("")
+
+    if args.parallel > 1:
+        args.quiet = 1
+
+    if len(args.files) == 1 and os.path.isdir(args.files[0]):
+        files = glob.glob(args.files[0] + "/????.png")
+    else:
+        files = args.files
+
+    if args.parallel < 2:
+        count = 0
+        for i, f in enumerate(files):
+            if args.parallel == 0: print_info(f)
+            count += 1
+            process1((f, i + 1))
+    else:
+        pool = Pool(processes=args.parallel)
+        jobs = []
+        for i, f in enumerate(files): jobs += [(f, i + 1)]
+        result = pool.map(process1, jobs)
+
+
