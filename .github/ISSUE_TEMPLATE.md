@@ -24,6 +24,6 @@
 <!--- Include as many relevant details about the environment you experienced the bug in -->
 <!-- Run `python -V` -->
 * Python version:
-<!--- Run `git log -n1` in the ocropy directory -->
+<!--- Run `git log -n1` in the ocropy_segmenter directory -->
 * Git revision of ocropy: 
 * Operating System and version:
