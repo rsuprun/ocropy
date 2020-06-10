@@ -28,7 +28,8 @@ class DefaultArgs:
     csminheight = 10  # 'minimum column height (units=scale)
     pad = 3  # 'padding for extracted lines'
     expand = 3  # 'expand mask for grayscale extraction'
-    output = None
+    output = None  # the output path
+    output_file = None  # the actual name of the output file
     output_suffix = ''
     parallel = 0  # number of CPUs to use
     debug = False
@@ -198,23 +199,35 @@ def main_process(file, kwargs, ind):
     args = DefaultArgs()
     args.file = file
     args.__dict__.update(**kwargs)
-
-    assert args.output is not None
     assert args.file is not None
 
-    png_name = os.path.split(os.path.splitext(args.file)[0])[1]
+    # if the file is a string object then attempt to load
+    if isinstance(args.file, str):
+        try:
+            binary = pg_seg_aux.read_image_binary(args.file)
+        except IOError:
+            print_error(f'Cannot open file: \n{args.file}')
+            return
+    elif isinstance(args.file, np.ndarray):
+        pg_seg_aux.check_binary(args.file)
+        binary = args.file
+    else:
+        raise TypeError("File object must either be a string path to a .png file, or an ndarray object")
+
     if args.output is not None:
-        args.output = os.path.join(os.path.split(args.file)[0], args.output, png_name + args.output_suffix)
+        try:
+            assert args.output_file is not None
+        except AssertionError:
+            raise AttributeError('Argument \'output_file\' must be specified if output path is sepcified.')
+        png_name = os.path.splitext(args.output_file)[0]
+        args.output = os.path.join(args.output, png_name + args.output_suffix)
         if not os.path.exists(args.output):
             os.mkdir(args.output)
 
-    try:
-        binary = pg_seg_aux.read_image_binary(args.file)
-    except IOError:
-        print_error(f'Cannot open file: \n{args.file}')
-        return
-
-    print(f'Processing file: {png_name} | {ind} of {args.total_files} total files')
+    if args.output:
+        print(f'Processing file: {png_name} | {ind} of {args.total_files} total files')
+    else:
+        print(f'Processing file: {ind} of {args.total_files} total files')
 
     binary = 1 - binary  # invert
     if args.scale == 0:

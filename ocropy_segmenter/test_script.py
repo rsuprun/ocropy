@@ -1,16 +1,18 @@
 import os
 
+import cv2
+
 from ocropy_segmenter import segmenter
 import multiprocessing as mp
 
 
 def main_root_path():
     _bp = os.getcwd()
-    for i in range(3):
+    for i in range(4):
         _bp = os.path.split(_bp)[0]
     assert os.path.exists(_bp)
     _bp = os.path.join(_bp, 'NSQIP_Abstraction_Automation_Master', 'data_files', 'scanned_forms',
-                       'seg_test', 'pre_op_checklist_p1')
+                       'seg_test', 'pre_op_checklist_p2')
     return _bp
 
 def find_new_files(src_path, dst_path, ftype, reprocess):
@@ -37,6 +39,7 @@ def find_new_files(src_path, dst_path, ftype, reprocess):
 
 def main():
 
+    use_mp = False
     rpath = main_root_path()
     src_scan_path = os.path.join(rpath, 'cropped')
     dest_scan_path = os.path.join(rpath, 'segged')
@@ -44,11 +47,19 @@ def main():
     file_list = find_new_files(src_path=src_scan_path, dst_path=dest_scan_path, ftype='.png', reprocess=False)
     file_dict = {os.path.splitext(os.path.split(f)[1])[0]:f for f in file_list}
     total_files = len(file_list)
-    kwargs = {'minscale':6.0, 'pad': 15, 'threshold': 0.05, 'output': dest_scan_path, 'total_files':total_files}
+    kwargs = {'minscale':6.0, 'pad': 15, 'threshold': 0.05, 'total_files':total_files}
+    # kwargs = {'minscale': 6.0, 'pad': 15, 'threshold': 0.05, 'output': dest_scan_path, 'total_files': total_files}
 
-    pool = mp.Pool(mp.cpu_count())
-    pool.starmap(segmenter.main_process, [(file, kwargs, ind) for ind, (fname, file) in enumerate(file_dict.items())])
-    pool.close()
+    if use_mp:
+        pool = mp.Pool(mp.cpu_count())
+        pool.starmap(segmenter.main_process, [(file, kwargs, ind) for ind, (fname, file) in enumerate(file_dict.items())])
+        pool.close()
+
+    else:
+        for ind, (fname, file) in enumerate(file_dict.items()):
+            img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
+            img = cv2.threshold(img, 101, 255, cv2.THRESH_BINARY)[1] // 255
+            segs = segmenter.main_process(img, kwargs, ind)
     print('Finished')
 
 

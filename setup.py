@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 
 setup(
     name = 'ocropy_segmenter',
-    version = '0.1.0',
+    version = '0.1.1',
     url = "https://github.com/rsuprun/ocropy",
     author = "Thomas Breuel (modified by Robin Suprun)",
     author_email = "robin.suprun@fraserhealth.ca",
