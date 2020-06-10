@@ -4,7 +4,6 @@ import PIL
 import cv2
 import numpy as np
 import scipy.ndimage as ndimage
-import re
 import matplotlib.pyplot as plt
 
 
@@ -18,72 +17,6 @@ def disp_img(img, title, h, w):
     cv2.resizeWindow(title, (w, h))
 
 
-def select_regions(binary,f,min=0,nbest=100000):
-    """Given a scoring function f over slice tuples (as returned by
-    find_objects), keeps at most nbest regions whose scores is higher
-    than min."""
-    labels,n = label(binary)
-    objects = find_objects(labels)
-    scores = [f(o) for o in objects]
-    best = np.argsort(scores)
-    keep = np.zeros(len(objects)+1,'i')
-    if nbest > 0:
-        for i in best[-nbest:]:
-            if scores[i]<=min: continue
-            keep[i+1] = 1
-    # print scores,best[-nbest:],keep
-    # print sorted(list(set(labels.ravel())))
-    # print sorted(list(set(keep[labels].ravel())))
-    return keep[labels]
-
-
-def strc(arg, n=10):
-    """Compact version of `str`."""
-    if isinstance(arg, float):
-        return "%.3g" % arg
-    if type(arg) == list:
-        return "[%s|%d]" % (",".join([strc(x) for x in arg[:3]]), len(arg))
-    if type(arg) == np.ndarray:
-        return "<ndarray-%x %s %s [%s,%s]>" % (id(arg), arg.shape, str(arg.dtype), np.amin(arg), np.amax(arg))
-    return str(arg).replace("\n", " ")
-
-
-def label(image,**kw):
-    """Redefine the scipy.ndimage.measurements.label function to
-    work with a wider range of data types.  The default function
-    is inconsistent about the data types it accepts on different
-    platforms."""
-    try: return ndimage.label(image,**kw)
-    except: pass
-    types = ["int32","uint32","int64","uint64","int16","uint16"]
-    for t in types:
-        try: return ndimage.label(np.array(image,dtype=t),**kw)
-        except: pass
-    # let it raise the same exception as before
-    return ndimage.label(image,**kw)
-
-
-def find_objects(image,**kw):
-    """Redefine the scipy.ndimage.measurements.find_objects function to
-    work with a wider range of data types.  The default function
-    is inconsistent about the data types it accepts on different
-    platforms."""
-    try: return ndimage.find_objects(image,**kw)
-    except: pass
-    types = ["int32","uint32","int64","uint64","int16","uint16"]
-    for t in types:
-        try: return ndimage.find_objects(np.array(image,dtype=t),**kw)
-        except: pass
-    # let it raise the same exception as before
-    return ndimage.find_objects(image,**kw)
-
-
-def isbytearray(a):
-    return a.dtype in [np.dtype('uint8')]
-
-def isfloatarray(a):
-    return a.dtype in [np.dtype('f'),np.dtype('float32'),np.dtype('float64')]
-
 def isintarray(a):
     return a.dtype in [np.dtype('B'),np.dtype('int16'),np.dtype('int32'),np.dtype('int64'),
                        np.dtype('uint16'),np.dtype('uint32'),np.dtype('uint64')]
@@ -96,48 +29,53 @@ def dim0(s):
     """Dimension of the slice list for dimension 0."""
     return s[0].stop-s[0].start
 
+
 def dim1(s):
     """Dimension of the slice list for dimension 1."""
     return s[1].stop-s[1].start
 
+
 def norm_max(a):
     return a/np.amax(a)
 
+
 def width(s):
     return s[1].stop-s[1].start
+
 
 def area(a):
     """Return the area of the slice list (ignores anything past a[:2]."""
     return np.prod([max(x.stop - x.start, 0) for x in a[:2]])
 
-def xcenter(s):
-    return np.mean([s[1].stop,s[1].start])
-
-def ycenter(s):
-    return np.mean([s[0].stop,s[0].start])
-
 def center(s):
-    return (ycenter(s),xcenter(s))
+    ycenter = np.mean([s[0].stop,s[0].start])
+    xcenter = np.mean([s[1].stop,s[1].start])
+    return (ycenter, xcenter)
 
-def check_binary(image):
-    assert image.dtype=='B' or image.dtype=='i' or image.dtype==np.dtype('bool'),\
-        "array should be binary, is %s %s"%(image.dtype,image.shape)
-    assert np.amin(image)>=0 and np.amax(image)<=1,\
-        "array should be binary, has values %g to %g"%(np.amin(image),np.amax(image))
 
 def r_dilation(image,size,origin=0):
     """Dilation with rectangular structuring element using maximum_filter"""
     return ndimage.maximum_filter(image,size,origin=origin)
 
+
 def r_erosion(image,size,origin=0):
     """Erosion with rectangular structuring element using maximum_filter"""
     return ndimage.minimum_filter(image,size,origin=origin)
 
-def r_opening(image,size,origin=0):
-    """Opening with rectangular structuring element using maximum/minimum filter"""
-    check_binary(image)
-    image = r_erosion(image,size,origin=origin)
-    return r_dilation(image,size,origin=origin)
+
+# def r_opening(image,size,origin=0):
+#     """Opening with rectangular structuring element using maximum/minimum filter"""
+#     check_binary(image)
+#     image = r_erosion(image,size,origin=origin)
+#     return r_dilation(image,size,origin=origin)
+#
+#
+# def r_closing(image,size,origin=0):
+#     """Closing with rectangular structuring element using maximum/minimum filter"""
+#     check_binary(image)
+#     image = r_dilation(image,size,origin=0)
+#     return r_erosion(image,size,origin=0)
+
 
 def rb_dilation(image,size,origin=0):
     """Binary dilation using linear filters."""
@@ -145,34 +83,57 @@ def rb_dilation(image,size,origin=0):
     ndimage.uniform_filter(image,size,output=output,origin=origin,mode='constant',cval=0)
     return np.array(output>0,'i')
 
+
 def rb_erosion(image,size,origin=0):
     """Binary erosion using linear filters."""
     output = np.zeros(image.shape,'f')
     ndimage.uniform_filter(image,size,output=output,origin=origin,mode='constant',cval=1)
     return np.array(output==1,'i')
 
+
 def rb_opening(image,size,origin=0):
     """Binary opening using linear filters."""
     image = rb_erosion(image,size,origin=origin)
     return rb_dilation(image,size,origin=origin)
 
-def allsplitext(path):
-    """Split all the pathname extensions, so that "a/b.c.d" -> "a/b", ".c.d" """
-    match = re.search(r'((.*/)*[^.]*)([^/]*)', path)
-    if not match:
-        return path, ""
-    else:
-        return match.group(1), match.group(3)
 
-def read_image_binary(fname, dtype='i', pageno=0):
+# def rb_closing(image,size,origin=0):
+#     """Binary closing using linear filters."""
+#     image = rb_dilation(image,size,origin=origin)
+#     return rb_erosion(image,size,origin=origin)
+
+
+def select_regions(binary,f,min=0,nbest=100000):
+    """Given a scoring function f over slice tuples (as returned by
+    find_objects), keeps at most nbest regions whose scores is higher
+    than min."""
+    labels,n = ndimage.label(binary)
+    objects = ndimage.find_objects(labels)
+    scores = [f(o) for o in objects]
+    best = np.argsort(scores)
+    keep = np.zeros(len(objects)+1,'i')
+    if nbest > 0:
+        for i in best[-nbest:]:
+            if scores[i]<=min: continue
+            keep[i+1] = 1
+    return keep[labels]
+
+
+def check_binary(image):
+    assert image.dtype=='B' or image.dtype=='i' or image.dtype==np.dtype('bool'),\
+        "array should be binary, is %s %s"%(image.dtype,image.shape)
+    assert np.amin(image)>=0 and np.amax(image)<=1,\
+        "array should be binary, has values %g to %g"%(np.amin(image),np.amax(image))
+
+
+def read_image_binary(fname, dtype='i'):
     """Read an image from disk and return it as a binary image
     of the given dtype."""
-    # if type(fname) == tuple: fname, pageno = fname
-    # assert pageno == 0
     pil = PIL.Image.open(fname)
     a = pil2array(pil)
     if a.ndim == 3: a = np.amax(a, axis=2)
     return np.array(a > 0.5 * (np.amin(a) + np.amax(a)), dtype)
+
 
 def pil2array(im, alpha=0):
     if im.mode == "L":
@@ -213,7 +174,7 @@ def propagate_labels(image,labels,conflict=0):
     """Given an image and a set of labels, apply the labels
     to all the regions in the image that overlap a label.
     Assign the value `conflict` to any labels that have a conflict."""
-    rlabels,_ = label(image)
+    rlabels,_ = ndimage.label(image)
     cors = correspondences(rlabels,labels)
     outputs = np.zeros(np.amax(rlabels)+1,'i')
     oops = -(1<<30)
@@ -237,7 +198,7 @@ def spread_labels(labels,maxdist=9999999):
 def compute_lines(segmentation,scale):
     """Given a line segmentation map, computes a list
     of tuples consisting of 2D slices and masked images."""
-    lobjects = find_objects(segmentation)
+    lobjects = ndimage.find_objects(segmentation)
     lines = []
     for i,o in enumerate(lobjects):
         if o is None: continue
@@ -252,7 +213,7 @@ def compute_lines(segmentation,scale):
     return lines
 
 
-def reading_order(lines,highlight=None):
+def reading_order(lines, highlight=None):
     """Given the list of lines (a list of 2D slices), computes
     the partial reading order.  The output is a binary 2D array
     such that order[i,j] is true if line i comes before line j
@@ -268,11 +229,6 @@ def reading_order(lines,highlight=None):
         if w[0].stop<min(u[0].start,v[0].start): return 0
         if w[0].start>max(u[0].stop,v[0].stop): return 0
         if w[1].start<u[1].stop and w[1].stop>v[1].start: return 1
-    # if highlight is not None:
-    #     plt.clf()
-    #     plt.title("highlight")
-    #     plt.imshow(binary)
-    #     plt.ginput(1,debug)
     for i,u in enumerate(lines):
         for j,v in enumerate(lines):
             if x_overlaps(u,v):
@@ -286,9 +242,6 @@ def reading_order(lines,highlight=None):
                 y0,x0 = center(lines[i])
                 y1,x1 = center(lines[j])
                 plt.plot([x0,x1+200],[y0,y1])
-    # if highlight is not None:
-    #     print()
-    #     plt.ginput(1,debug)
     return order
 
 
@@ -307,7 +260,7 @@ def topsort(order):
         L.append(k)
     for k in range(n):
         visit(k)
-    return L #[::-1]
+    return L
 
 
 def array2pil(a):
@@ -374,7 +327,7 @@ def remove_noise(line,minsize=8):
     """Remove small pixels from an image."""
     if minsize==0: return line
     bin = (line>0.5*np.amax(line))
-    labels,n = label(bin)
+    labels,n = ndimage.label(bin)
     sums = ndimage.sum(bin,labels,range(n+1))
     sums = sums[labels]
     good = np.minimum(bin,1-(sums>0)*(sums<minsize))
@@ -393,7 +346,6 @@ def extract(image,y0,x0,y1,x1,mode='nearest',cval=0):
     ch,cw = y1-y0,x1-x0
     y,x = np.clip(y0,0,max(h-ch,0)),np.clip(x0,0,max(w-cw, 0))
     sub = image[y:y+ch,x:x+cw]
-    # print("extract", image.dtype, image.shape)
     try:
         r = ndimage.shift(sub,(y-y0,x-x0),mode=mode,cval=cval,order=0)
         if cw > w or ch > h:
@@ -444,8 +396,8 @@ def glob_all(args):
 
 
 def remove_hlines(binary, scale, maxsize=10):
-    labels, _ = label(binary)
-    objects = find_objects(labels)
+    labels, _ = ndimage.label(binary)
+    objects = ndimage.find_objects(labels)
     for i, b in enumerate(objects):
         if width(b) > maxsize * scale:
             labels[b][labels[b] == i + 1] = 0
@@ -454,9 +406,10 @@ def remove_hlines(binary, scale, maxsize=10):
 
 
 def binary_objects(binary):
-    labels, n = label(binary)
-    objects = find_objects(labels)
+    labels, n = ndimage.label(binary)
+    objects = ndimage.find_objects(labels)
     return objects
+
 
 def estimate_scale(binary):
     objects = binary_objects(binary)
@@ -468,13 +421,13 @@ def estimate_scale(binary):
     scale = np.median(scalemap[(scalemap > 3) & (scalemap < 100)])
     return scale
 
+
 def compute_boxmap(binary, scale, threshold=(.5, 4), dtype='i'):
     objects = binary_objects(binary)
     bysize = sorted(objects, key=area)
     boxmap = np.zeros(binary.shape, dtype)
     for o in bysize:
-        _a = area(o)
         if area(o) ** .5 < threshold[0] * scale: continue
         if area(o) ** .5 > threshold[1] * scale: continue
         boxmap[o] = 1
-        return boxmap
+    return boxmap
