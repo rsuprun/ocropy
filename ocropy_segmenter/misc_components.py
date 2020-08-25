@@ -1,4 +1,5 @@
 import glob
+import copy
 
 import PIL
 import cv2
@@ -63,20 +64,6 @@ def r_erosion(image,size,origin=0):
     return ndimage.minimum_filter(image,size,origin=origin)
 
 
-# def r_opening(image,size,origin=0):
-#     """Opening with rectangular structuring element using maximum/minimum filter"""
-#     check_binary(image)
-#     image = r_erosion(image,size,origin=origin)
-#     return r_dilation(image,size,origin=origin)
-#
-#
-# def r_closing(image,size,origin=0):
-#     """Closing with rectangular structuring element using maximum/minimum filter"""
-#     check_binary(image)
-#     image = r_dilation(image,size,origin=0)
-#     return r_erosion(image,size,origin=0)
-
-
 def rb_dilation(image,size,origin=0):
     """Binary dilation using linear filters."""
     output = np.zeros(image.shape,'f')
@@ -95,12 +82,6 @@ def rb_opening(image,size,origin=0):
     """Binary opening using linear filters."""
     image = rb_erosion(image,size,origin=origin)
     return rb_dilation(image,size,origin=origin)
-
-
-# def rb_closing(image,size,origin=0):
-#     """Binary closing using linear filters."""
-#     image = rb_dilation(image,size,origin=origin)
-#     return rb_erosion(image,size,origin=origin)
 
 
 def select_regions(binary,f,min=0,nbest=100000):
@@ -195,14 +176,14 @@ def spread_labels(labels,maxdist=9999999):
     return spread
 
 
-def compute_lines(segmentation,scale):
+def compute_lines(segmentation, minscale):
     """Given a line segmentation map, computes a list
     of tuples consisting of 2D slices and masked images."""
     lobjects = ndimage.find_objects(segmentation)
     lines = []
     for i,o in enumerate(lobjects):
         if o is None: continue
-        if dim1(o)<2*scale or dim0(o)<scale: continue
+        if dim0(o) < minscale: continue
         mask = (segmentation[o]==i+1)
         if np.amax(mask)==0: continue
         result = record()
@@ -395,14 +376,80 @@ def glob_all(args):
     return result
 
 
-def remove_hlines(binary, scale, maxsize=10):
+def erode_hlines_and_vlines(binary, scale, args):
+
+    # generate the kernels
+    min_width = int(args.hline_perc * binary.shape[1])
+    min_height = int(args.vline_perc * binary.shape[0])
+    hkernel = np.ones((1, min_width), dtype='uint8')
+    vkernel = np.ones((min_height, 1), dtype='uint8')
+    bin_copy = copy.deepcopy(binary)
+
+    # remove horizontal lines
+    _binary = cv2.erode(binary, hkernel, iterations=1, borderValue=0, borderType=cv2.BORDER_CONSTANT)
+    labels, _ = ndimage.label(_binary)
+    objects = ndimage.find_objects(labels)
+    extr = 1
+    for i, b in enumerate(objects):
+        # extend the found lines half the padding kernel size
+        y_slc = slice(max(b[0].start-extr,0), min(b[0].stop+extr, binary.shape[0]))
+        x_slc = slice(max(b[1].start-(min_width//2),0), min(b[1].stop+(min_width//2), binary.shape[1]))
+        bin_copy[y_slc, x_slc] = 0
+
+    # remove vertical lines
+    _binary = cv2.erode(binary, vkernel, iterations=1, borderValue=0, borderType=cv2.BORDER_CONSTANT)
+    labels, _ = ndimage.label(_binary)
+    objects = ndimage.find_objects(labels)
+    extr = 1
+    for i, b in enumerate(objects):
+        # extend the found lines half the padding kernel size
+        y_slc = slice(max(b[0].start-(min_height//2),0), min(b[0].stop+(min_height//2), binary.shape[0]))
+        x_slc = slice(max(b[1].start-extr,0), min(b[1].stop+extr, binary.shape[1]))
+        binary[y_slc, x_slc] = 0
+
+    # merge the results
+    binary = np.array((bin_copy + binary == 2), dtype='uint8')
+
+    return binary
+
+
+def remove_hlines_and_vlines(binary, scale, args):
+    min_width = int(args.hline_perc * binary.shape[1])
+    min_height = int(args.vline_perc * binary.shape[0])
     labels, _ = ndimage.label(binary)
     objects = ndimage.find_objects(labels)
+
     for i, b in enumerate(objects):
-        if width(b) > maxsize * scale:
-            labels[b][labels[b] == i + 1] = 0
-    _a = np.array(labels != 0, 'B')
-    return np.array(labels != 0, 'B')
+        if width(b) > min_width:
+            section = binary[b]
+            for rw in range(section.shape[0]):
+                run_values, run_starts, run_lengths = find_runs(section[rw, :])
+                run_lengths = run_lengths[run_values == 1]
+                run_starts = run_starts[run_values == 1]
+                run_starts = run_starts[run_lengths > min_width]
+                run_lengths = run_lengths[run_lengths > min_width]
+                y_slc = slice(b[0].start + rw, b[0].start + rw + 1)
+                for i, rn in enumerate(run_starts):
+                    x_slc = slice(b[1].start + rn, b[1].start + rn + run_lengths[i])
+                    binary[y_slc, x_slc] = 0
+
+        if dim0(b) > min_height:
+            section = binary[b]
+            for cl in range(section.shape[1]):
+                run_values, run_starts, run_lengths = find_runs(section[:, cl])
+                run_lengths = run_lengths[run_values == 1]
+                run_starts = run_starts[run_values == 1]
+                run_starts = run_starts[run_lengths > min_height]
+                run_lengths = run_lengths[run_lengths > min_height]
+                x_slc = slice(b[1].start + cl, b[1].start + cl + 1)
+                for i, rn in enumerate(run_starts):
+                    y_slc = slice(b[0].start + rn, b[0].start + rn + run_lengths[i])
+                    binary[y_slc, x_slc] = 0
+
+    binary = rb_opening(binary, 2)
+    if args.extra_erode:
+        binary = rb_erosion(binary, 2)
+    return binary
 
 
 def binary_objects(binary):
@@ -431,3 +478,29 @@ def compute_boxmap(binary, scale, threshold=(.5, 4), dtype='i'):
         if area(o) ** .5 > threshold[1] * scale: continue
         boxmap[o] = 1
     return boxmap
+
+
+def find_runs(x):
+    """Find runs of consecutive items in an array."""
+
+    # ensure array
+    x = np.asanyarray(x)
+    if x.ndim != 1:
+        raise ValueError('only 1D array supported')
+    n = x.shape[0]
+
+    # handle empty array
+    if n == 0:
+        return np.array([]), np.array([]), np.array([])
+
+    else:
+        # find run starts
+        loc_run_start = np.empty(n, dtype=bool)
+        loc_run_start[0] = True
+        np.not_equal(x[:-1], x[1:], out=loc_run_start[1:])
+        run_starts = np.nonzero(loc_run_start)[0]
+        # find run values
+        run_values = x[loc_run_start]
+        # find run lengths
+        run_lengths = np.diff(np.append(run_starts, n))
+        return run_values, run_starts, run_lengths
